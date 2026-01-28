@@ -1,4 +1,4 @@
-import { DEFAULT_CASHFLOW_PROFILES, DEFAULT_ALLOCATION_RULES, NET_POSITION_PROFILES } from '../config/dummyData.js';
+import { DEFAULT_CASHFLOW_PROFILES, DEFAULT_ALLOCATION_RULES, NET_POSITION_PROFILES, NAV_PROFILES } from '../config/dummyData.js';
 
 /**
  * Calculates the cashflow effect of a commitment over time.
@@ -64,7 +64,7 @@ function calculateCommitmentProjection(commitmentAmount, profile, startYearIndex
  * @param {number} params.maxYearlyChange - Percentage (0.0 - 1.0, default 0.2).
  * @param {number} params.firstYearCap - Percentage of AvailCap (0.0 - 1.0, default 0.25).
  */
-export function solveCPT({ availableCapital, startYear, horizon, planningHorizon, projectionHorizon = 50, config, selectedCategories, maxYearlyChange = 0.2, firstYearCap = 0.25 }) {
+export function solveCPT({ availableCapital, startYear, horizon, planningHorizon, projectionHorizon = 50, config, selectedCategories, maxYearlyChange = 0.2, firstYearCap = 0.25, manualOverrides }) {
     const profiles = config?.profiles || DEFAULT_CASHFLOW_PROFILES;
     const rules = config?.rules || DEFAULT_ALLOCATION_RULES;
 
@@ -114,25 +114,88 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
                 if (selectedCategories.vc) ratios.vc = rawRatios.vc / ratioSum;
             }
 
-            // 2. Define Feasibility Check
-            // We need to commit amount C such that for ALL t >= yearIdx (up to totalHorizon):
-            // CashBalance[t] >= Unfunded[t] (Strict Liquidity: 100% Cash Backed)
+            // Check for Manual Overrides (NEW)
+            // manualOverrides structure: { [yearIndex]: { secondaries: val, pe: val, vc: val } }
+            // or we pass it as { [year]: ... }? Better yearIndex for array alignment, but year for stability.
+            // Let's assume yearIndex 0-based relative to startYear.
 
-            const isFeasible = (amount) => {
-                // Distribute amount
-                const breakdowns = {
-                    secondaries: amount * ratios.secondaries,
-                    pe: amount * ratios.pe,
-                    vc: amount * ratios.vc
-                };
+            const overrides = manualOverrides?.[yearIdx];
+
+            let optimal = 0;
+            let breakdown = { secondaries: 0, pe: 0, vc: 0 };
+            let isManual = false;
+
+            // If we have ANY override for this year, we treat this year as "Manually Directed" to some extent.
+            // Simplified logic: If an override exists for a category, use it. 
+            // For non-overridden categories, what do we do?
+            // Option A: If any override exists, ONLY use overrides (don't auto-fill others).
+            // Option B: Optimizer fills the rest. (Complex: constraints change).
+            // User request: "Adjust commitment manually in matrix". 
+            // Implies: If I change PE, the rest stays as calculated? Or recalculates?
+            // "Recalculate": implies other numbers might shift.
+            // BUT: If I override PE to 5M, the solver should optimize around it?
+            // Let's go with Safe/Simple: If user overrides specific cells, we respect those. 
+            // For the REMAINING categories, we optimize normally?
+            // Let's try:
+            // 1. Calculate optimal TOTAL (unconstrained by manual split).
+            // 2. See if manual overrides fit.
+            // OR:
+            // Just treat overrides as fixed inputs. If all 3 are overridden, total is fixed.
+            // If only 1 is overridden, we optimize the other 2?
+
+            // Current approach for robustness:
+            // If ANY override exists for this year, we lock those values.
+            // Then we optimize the *remaining* potential commitment for the non-locked categories.
+
+            // However, the current optimizer solves for a single scalar "Total Commitment" then splits by ratio.
+            // If we lock one category, the ratios approach breaks.
+
+            // REVISED STRATEGY: 
+            // 1. Calculate "Forced Commitment" from overrides.
+            // 2. Adjust available ratios to exclude overridden categories.
+            // 3. Solve for "Remaining Optimal Amount" for non-overridden categories.
+            // 4. Combine.
+
+            const forcedBreakdown = { secondaries: 0, pe: 0, vc: 0 };
+            const activeRatios = { ...ratios };
+            let hasOverride = false;
+            let forcedTotal = 0;
+
+            if (overrides) {
+                ['secondaries', 'pe', 'vc'].forEach(cat => {
+                    if (overrides[cat] !== undefined && overrides[cat] !== null) {
+                        forcedBreakdown[cat] = overrides[cat]; // This is the manual amount
+                        forcedTotal += overrides[cat];
+                        activeRatios[cat] = 0; // Don't allocate via optimizer
+                        hasOverride = true;
+                    }
+                });
+            }
+
+            // Normalize remaining ratios
+            let activeRatioSum = activeRatios.secondaries + activeRatios.pe + activeRatios.vc;
+            if (activeRatioSum > 0) {
+                // Re-normalize to sum to 1
+                activeRatios.secondaries /= activeRatioSum;
+                activeRatios.pe /= activeRatioSum;
+                activeRatios.vc /= activeRatioSum;
+            }
+
+            // Feasibility Function (Updated)
+            // Solves for "additionalAmount" to distribute among ACTIVE categories
+            const isFeasible = (additionalAmount) => {
+                // Total new flows = Forced Flows + Additional Flows
+                const newBreakdown = { ...forcedBreakdown };
+                newBreakdown.secondaries += additionalAmount * activeRatios.secondaries;
+                newBreakdown.pe += additionalAmount * activeRatios.pe;
+                newBreakdown.vc += additionalAmount * activeRatios.vc;
 
                 const newFlows = new Array(totalHorizon).fill(0);
                 const newUnfunded = new Array(totalHorizon).fill(0);
 
-                // Calculate impact of NEW commitment
                 ['secondaries', 'pe', 'vc'].forEach(cat => {
-                    if (breakdowns[cat] > 0) {
-                        const proj = calculateCommitmentProjection(breakdowns[cat], profiles[cat], yearIdx, totalHorizon);
+                    if (newBreakdown[cat] > 0) {
+                        const proj = calculateCommitmentProjection(newBreakdown[cat], profiles[cat], yearIdx, totalHorizon);
                         for (let t = 0; t < totalHorizon; t++) {
                             newFlows[t] += proj.cashflows[t];
                             newUnfunded[t] += proj.unfunded[t];
@@ -140,80 +203,92 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
                     }
                 });
 
-                // Check Future Integrity (Full Projection)
-                let runningBalance = availableCapital; // Start T=0
-
+                // Check Integrity
+                let runningBalance = availableCapital;
                 for (let t = 0; t < totalHorizon; t++) {
-                    // Update running balance with established flows ONLY
                     runningBalance += currentProjectedCashflows[t];
-                    // Add NEW flow
                     runningBalance += newFlows[t];
 
                     if (t >= yearIdx) {
                         const totalUnfunded = currentProjectedUnfunded[t] + newUnfunded[t];
-
-                        if (runningBalance < totalUnfunded) {
-                            return false;
-                        }
-
-                        // Also basic sanity: Cash shouldn't be negative just from calls
+                        if (runningBalance < totalUnfunded) return false;
                         if (runningBalance < 0) return false;
+
+                        // LIQUIDITY CAP (Soft constraint logic from prev versions?)
+                        // No, just solvency.
                     }
                 }
                 return true;
             };
 
-            // 3. Define Bounds based on Smoothing
-            let maxCommitment = availableCapital * 2; // Theoretical max
+            // Optimization
+            // If ALL categories are overridden (activeRatioSum == 0), we just take forcedTotal.
+            // But we still check feasibility to warn? Or just accept it (User override is god)?
+            // User requested "automatically calculated through" implies calculations update.
+            // If not feasible, should we block? Likely no, just show negative numbers.
+            // BUT solver's job is to find optimal. If manual, we just process it.
 
-            if (smoothingEnabled) {
-                if (yearIdx === 0) {
-                    // Year 1 Cap
-                    maxCommitment = availableCapital * firstYearCap;
-                } else {
-                    // Year > 1
-                    // Allow restart if we dropped to 0: Max of (LastYear + Growth) OR (5% of AvailableCapital)
-                    const growthCap = lastYearCommitment * (1 + maxYearlyChange);
-                    const restartFloor = availableCapital * 0.05;
-                    maxCommitment = Math.max(growthCap, restartFloor);
+            if (activeRatioSum === 0 && hasOverride) {
+                optimal = forcedTotal;
+                breakdown = forcedBreakdown;
+                isManual = true;
+            } else {
+                // We have some freedom left. Solve for additionalAmount.
+
+                // Bounds for Additional Amount
+                let maxAdditional = availableCapital * 2;
+
+                // Smoothing logic applies to TOTAL (Forced + Additional)
+                if (smoothingEnabled) {
+                    if (yearIdx === 0) {
+                        const cap = availableCapital * firstYearCap;
+                        maxAdditional = Math.max(0, cap - forcedTotal);
+                    } else {
+                        const growthCap = lastYearCommitment * (1 + maxYearlyChange);
+                        const restartFloor = availableCapital * 0.05;
+                        const maxTotal = Math.max(growthCap, restartFloor);
+                        maxAdditional = Math.max(0, maxTotal - forcedTotal);
+                    }
                 }
+                maxAdditional = Math.min(maxAdditional, availableCapital * 5); // Hard cap
+
+                // Binary Search for Additional
+                let low = 0;
+                let high = maxAdditional;
+                let bestAdd = 0;
+
+                // Optimization: If isFeasible(high) is true, just take high? 
+                // We want MAX feasible.
+
+                for (let iter = 0; iter < 20; iter++) {
+                    const mid = (low + high) / 2;
+                    if (isFeasible(mid)) {
+                        bestAdd = mid;
+                        low = mid;
+                    } else {
+                        high = mid;
+                    }
+                }
+
+                bestAdd = Math.floor(bestAdd / 1000) * 1000;
+
+                // Construct final breakdown
+                optimal = forcedTotal + bestAdd;
+                breakdown = {
+                    secondaries: forcedBreakdown.secondaries + (bestAdd * activeRatios.secondaries),
+                    pe: forcedBreakdown.pe + (bestAdd * activeRatios.pe),
+                    vc: forcedBreakdown.vc + (bestAdd * activeRatios.vc)
+                };
             }
 
-            // Hard Cap for safety (avoid infinite loops)
-            maxCommitment = Math.min(maxCommitment, availableCapital * 5);
-
-
-            // 4. Binary Search for Optimal
-            let low = 0;
-            let high = maxCommitment;
-            let optimal = 0;
-
-            for (let iter = 0; iter < 20; iter++) {
-                const mid = (low + high) / 2;
-                if (isFeasible(mid)) {
-                    optimal = mid;
-                    low = mid;
-                } else {
-                    high = mid;
-                }
-            }
-
-            // Round to nearest 1k
-            optimal = Math.floor(optimal / 1000) * 1000;
-
-            // 5. Store & Update State
-            const breakdown = {
-                secondaries: optimal * ratios.secondaries,
-                pe: optimal * ratios.pe,
-                vc: optimal * ratios.vc
-            };
-
+            // Store
             commitments.push({
                 year: currentYear,
                 amount: optimal,
                 breakdown,
                 ratios: { ...ratios },
-                phase
+                phase,
+                isManual
             });
 
             lastYearCommitment = optimal;
@@ -239,7 +314,6 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
             const netFlow = currentProjectedCashflows[t];
             runningMult += netFlow;
 
-            // Determine committed amount for this year (if within planning horizon)
             const committedAmount = t < pHorizon && commitments[t] ? commitments[t].amount : 0;
             const committedBreakdown = t < pHorizon && commitments[t] ? commitments[t].breakdown : { secondaries: 0, pe: 0, vc: 0 };
 
@@ -249,7 +323,6 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
                 endBalance: runningMult,
                 totalCommitted: committedAmount,
                 unfunded: currentProjectedUnfunded[t],
-                // Per Category Committed
                 breakdown: committedBreakdown
             });
         }
@@ -293,7 +366,9 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
         return calls === 0 ? 0 : distributions / calls;
     };
 
-    const netPositions = config?.netPositions || NET_POSITION_PROFILES;
+    // Use NAV Profiles for exposure calculation to ensure positive bars
+    // If config doesn't have custom NAV profiles, use default estimates.
+    const navProfiles = config?.navProfiles || NAV_PROFILES;
 
     const catMetrics = {
         secondaries: { moic: calculateMetrics(profiles.secondaries) },
@@ -308,18 +383,25 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
 
     let cumCalls = 0;
     let cumDist = 0;
+    let cumCommitments = 0; // NEW: Track cumulative commitments over time
 
     result.annualReport.forEach((r, idx) => {
         let yearCalls = 0;
         let yearDist = 0;
         let trueNav = 0;
 
+        // Add this year's commitment to cumulative total
+        // (commitments array is indexed by year offset from startYear)
+        if (idx < result.commitments.length && result.commitments[idx]) {
+            cumCommitments += result.commitments[idx].amount;
+        }
+
         // Iterate all commitments made
         result.commitments.forEach(c => {
             ['secondaries', 'pe', 'vc'].forEach(cat => {
                 if (c.breakdown[cat] > 0) {
                     const prof = profiles[cat];
-                    const npProf = netPositions[cat];
+                    const navProf = navProfiles[cat];
                     const age = r.year - c.year;
 
                     // Cashflow calc
@@ -330,8 +412,8 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
                     }
 
                     // NAV/Exposure calc
-                    if (age >= 0 && age < npProf.length) {
-                        trueNav += c.breakdown[cat] * npProf[age];
+                    if (age >= 0 && age < navProf.length) {
+                        trueNav += c.breakdown[cat] * navProf[age];
                     }
                 }
             });
@@ -340,16 +422,35 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
         cumCalls += yearCalls;
         cumDist += yearDist;
 
-        // Determine Break Even
-        if (breakEvenYear === null && cumDist >= cumCalls) {
-            breakEvenYear = r.year;
-        }
 
+
+        // NEW: Calculate AVAILABLE CASH correctly
+        // Available Cash = Starting Capital - Cumulative Commitments + Cumulative Distributions
+        // This represents money that can still be committed to new funds
+        const availableCash = availableCapital - cumCommitments + cumDist;
+
+        // Assign calculated values to report
         r.nav = trueNav;
-        r.totalValue = r.endBalance + trueNav; // Cash + NAV
-        r.investedCapital = trueNav; // Display NAV as the "Invested/Exposure" bar
+        r.cumulativeCommitments = cumCommitments;  // NEW: Total locked capital
         r.cumulativeCalls = cumCalls;
         r.cumulativeDistributions = cumDist;
+        r.availableCash = availableCash;           // NEW: True investable capital
+        r.capitalCalled = cumCalls;                // NEW: Actual money spent
+
+        // For chart display:
+        // - investedCapital: NAV (market value of active investments)
+        // - lockedCapital: cumulative commitments (money promised to funds)
+        r.investedCapital = trueNav;
+        r.lockedCapital = cumCommitments;
+
+        // Total Value calculation per user request: 
+        // "total value = available cash + commitments"
+        // This avoids showing the J-curve drop (NAV < Cost) in early years.
+        // Formula: (Capital - Commitments + Distributions) + Commitments = Capital + Distributions
+        r.totalValue = availableCash + cumCommitments;
+
+        // Profit calculation: Distributions - Capital Called (NOT commitments)
+        r.realizedProfit = cumDist - cumCalls;
     });
 
     totalCalls = cumCalls;
@@ -357,6 +458,12 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
 
     // Use end of projection for final metrics
     const finalReportItem = result.annualReport[result.totalHorizon - 1];
+
+    // Calculate Fully Committed Year: First year where Cumulative Commitments >= Initial Available Capital
+    // We can find this by looking at result.annualReport.
+    // Note: r.cumulativeCommitments is available in the report.
+    const fullyCommittedItem = result.annualReport.find(r => r.cumulativeCommitments >= availableCapital);
+    const fullyCommittedYear = fullyCommittedItem ? fullyCommittedItem.year : null;
 
     const portfolioMOIC = totalCalls > 0 ? (totalDistributions + finalReportItem.nav) / totalCalls : 0;
 
@@ -372,7 +479,7 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
             categoryMetrics: catMetrics,
             // New Metrics
             portfolioMOIC,
-            breakEvenYear,
+            fullyCommittedYear,
             finalNav: finalReportItem.nav,
             finalCash: finalReportItem.endBalance,
             finalTotalValue: finalReportItem.totalValue

@@ -54,6 +54,11 @@ function App() {
     };
   });
 
+  // New: Manual Overrides State
+  // Structure: { [yearIndex]: { category: amount } }
+  // Persist? Maybe not necessary for prototype, but useful.
+  const [manualOverrides, setManualOverrides] = useState({});
+
   // Solver Result State (can be transient, but we persist to avoid recalc flicker)
   const [result, setResult] = useState(null);
 
@@ -91,7 +96,8 @@ function App() {
           config: config,
           selectedCategories: categories,
           maxYearlyChange: params.maxYearlyChange,
-          firstYearCap: params.firstYearCap
+          firstYearCap: params.firstYearCap,
+          manualOverrides: manualOverrides // Pass overrides
         });
         setResult(res);
       } catch (err) {
@@ -99,7 +105,7 @@ function App() {
         // Optional: Set an error state to display in UI?
       }
     }
-  }, [params, categories, config]);
+  }, [params, categories, config, manualOverrides]);
 
   const handleConfigChange = (newConfig) => {
     setConfig(newConfig);
@@ -124,6 +130,8 @@ function App() {
             params={params}
             config={config}
             onOpenSettings={() => setIsSettingsOpen(true)}
+            manualOverrides={manualOverrides}
+            setManualOverrides={setManualOverrides}
           />
         }
       />

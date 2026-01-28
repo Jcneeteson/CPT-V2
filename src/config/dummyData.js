@@ -64,6 +64,22 @@ export const NET_POSITION_PROFILES = {
     ]
 };
 
+// 5. Estimated NAV Profiles (Exposure as % of Commitment)
+export const NAV_PROFILES = {
+    secondaries: [
+        0.30, 0.55, 0.75, 0.85, 0.70,
+        0.55, 0.40, 0.25, 0.15, 0.05, 0.0, 0.0
+    ],
+    pe: [
+        0.20, 0.40, 0.60, 0.80, 0.90,
+        0.95, 0.85, 0.70, 0.50, 0.30, 0.15, 0.05
+    ],
+    vc: [
+        0.10, 0.20, 0.40, 0.60, 0.80,
+        0.90, 0.95, 0.90, 0.80, 0.60, 0.40, 0.20
+    ]
+};
+
 // Helper to get data with local storage overrides
 export const getConfiguration = () => {
     const saved = localStorage.getItem('cpt_v2_config');

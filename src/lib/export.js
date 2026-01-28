@@ -1,96 +1,144 @@
 import ExcelJS from 'exceljs';
 
-export async function exportToExcel(templateFile, result, params) {
+/**
+ * Exports the CPT plan to Excel using a bundled template.
+ * Uses SheetJS (xlsx) library for better compatibility with complex Excel files.
+ * @param {object} result - The solver result.
+ * @param {object} params - The params including startYear.
+ * @param {string} clientName - The client name for the file.
+ */
+export async function exportToExcel(result, params, clientName) {
     const workbook = new ExcelJS.Workbook();
-    const buffer = await templateFile.arrayBuffer();
-    await workbook.xlsx.load(buffer);
 
-    // 1. Helper to find columns by header name
-    const getColumnIndex = (sheet, headerRegex, startRow = 1) => {
-        // Search first 10 rows for header
-        for (let r = startRow; r <= 10; r++) {
-            const row = sheet.getRow(r);
-            for (let c = 1; c <= row.cellCount; c++) {
-                const val = row.getCell(c).value;
-                if (val && headerRegex.test(String(val))) {
-                    return { col: c, headerRow: r };
-                }
-            }
+    // Fetch template from public folder
+    try {
+        const response = await fetch('/cpt_template.xlsx');
+        if (!response.ok) {
+            throw new Error(`Template niet gevonden (HTTP ${response.status})`);
         }
-        return null;
+        const buffer = await response.arrayBuffer();
+        await workbook.xlsx.load(buffer);
+    } catch (e) {
+        console.error("Error loading template:", e);
+        throw new Error("Fout bij laden van Excel template.");
+    }
+
+    const summarySheet = workbook.getWorksheet('Samenvatting');
+    if (!summarySheet) {
+        throw new Error('Sheet "Samenvatting" niet gevonden in template.');
+    }
+
+    // Configuration for mapping
+    // Columns (1-based index):
+    const COL_TYPE = 4;   // D: Fondstype
+    const COL_AMT = 6;    // F: Bedrag / Commitment
+    const COL_YEAR = 11;  // K: Instap Jaar
+
+    // IMPORTANT: Limit row range to avoid shared formula issues
+    // The error was at L139, so we stop before that area
+    const START_ROW = 43;
+    const MAX_ROW = 100;  // Reduced from 200 to avoid formula conflicts
+
+    // Helper: Normalize Year from cell value
+    const getYearFromCell = (cellValue) => {
+        if (!cellValue) return null;
+        if (cellValue instanceof Date) return cellValue.getFullYear();
+        if (typeof cellValue === 'number') {
+            if (cellValue > 2500 && cellValue < 60000) {
+                return null;
+            }
+            if (cellValue >= 2000 && cellValue <= 2100) return cellValue;
+        }
+        const s = String(cellValue);
+        const match = s.match(/20\d{2}/);
+        return match ? parseInt(match[0], 10) : null;
     };
 
-    // 2. Process "Planning" Sheet
-    const planningSheet = workbook.getWorksheet('Planning') || workbook.worksheets[0]; // Fallback to first sheet
+    // Helper: Normalize Type string
+    const normalizeType = (s) => {
+        if (!s) return "";
+        const str = String(s).toLowerCase();
+        if (str.includes('secondaries')) return 'secondaries';
+        if (str.includes('pe') || str.includes('private equity')) return 'pe';
+        if (str.includes('vc') || str.includes('venture')) return 'vc';
+        return str;
+    };
 
-    if (planningSheet) {
-        // Identify columns
-        // We look for "Year" or "Jaar", "Secondaries", "PE", "VC"
-        const colYear = getColumnIndex(planningSheet, /(Year|Jaar)/i);
-        const colSec = getColumnIndex(planningSheet, /(Secondaries)/i);
-        const colPe = getColumnIndex(planningSheet, /(PE|Private Equity)/i);
-        const colVc = getColumnIndex(planningSheet, /(VC|Venture Capital)/i);
+    // Flatten commitments into a list of { year, type, amount }
+    const commitmentsToWrite = [];
+    result.commitments.forEach(c => {
+        if (c.breakdown.secondaries > 0) commitmentsToWrite.push({ year: c.year, type: 'secondaries', amount: c.breakdown.secondaries });
+        if (c.breakdown.pe > 0) commitmentsToWrite.push({ year: c.year, type: 'pe', amount: c.breakdown.pe });
+        if (c.breakdown.vc > 0) commitmentsToWrite.push({ year: c.year, type: 'vc', amount: c.breakdown.vc });
+    });
 
-        if (colYear && colSec && colPe && colVc) {
-            const headerRow = colYear.headerRow; // Assume headers are aligned
+    // Build row index - only read values, don't touch formulas
+    const rows = [];
+    for (let r = START_ROW; r <= MAX_ROW; r++) {
+        const row = summarySheet.getRow(r);
+        const typeCell = row.getCell(COL_TYPE);
+        const yearCell = row.getCell(COL_YEAR);
 
-            // Iterate through results and write to matching year rows
-            result.commitments.forEach(c => {
-                // Find row with this year (search below header)
-                let targetRow;
-                for (let r = headerRow + 1; r <= 1000; r++) {
-                    const cellVal = planningSheet.getCell(r, colYear.col).value;
-                    if (cellVal == c.year) {
-                        targetRow = planningSheet.getRow(r);
-                        break;
-                    }
-                }
+        // Get raw values, avoiding formula cells
+        const typeVal = typeCell.value;
+        const yearVal = yearCell.value;
 
-                // If row exists, update it. If not, maybe append? 
-                // Ideally we only update existing rows to preserve template structure.
-                if (targetRow) {
-                    targetRow.getCell(colSec.col).value = c.breakdown.secondaries;
-                    targetRow.getCell(colPe.col).value = c.breakdown.pe;
-                    targetRow.getCell(colVc.col).value = c.breakdown.vc;
-                    targetRow.commit();
-                } else {
-                    // Warning: Year not found in template. 
-                    // We could append, but that might break formulas.
-                    // Detailed logging needed? For now, we skip.
-                    console.warn(`Year ${c.year} not found in template.`);
-                }
-            });
+        const type = normalizeType(typeVal);
+        const year = getYearFromCell(yearVal);
+        const isEmpty = !type && !year;
+
+        rows.push({ rowIndex: r, type, year, isEmpty, rowObj: row });
+    }
+
+    // Process each commitment - only write to amount column
+    let writtenCount = 0;
+    commitmentsToWrite.forEach(item => {
+        let match = rows.find(r => r.type === item.type && r.year === item.year);
+
+        if (match) {
+            // Only update the amount cell, leave others intact
+            const amtCell = match.rowObj.getCell(COL_AMT);
+            amtCell.value = item.amount;
+            writtenCount++;
         } else {
-            throw new Error('Could not find required columns (Year, Secondaries, PE, VC) in "Planning" sheet.');
+            // Find empty slot
+            const emptySlot = rows.find(r => r.isEmpty);
+            if (emptySlot) {
+                console.log(`Writing new entry to row ${emptySlot.rowIndex}: ${item.type} ${item.year}`);
+
+                let typeLabel = "Private Equity";
+                if (item.type === 'secondaries') typeLabel = "Secondaries";
+                if (item.type === 'vc') typeLabel = "Venture Capital";
+
+                // Write values carefully
+                emptySlot.rowObj.getCell(COL_TYPE).value = typeLabel;
+                emptySlot.rowObj.getCell(COL_YEAR).value = item.year; // Use plain number instead of Date
+                emptySlot.rowObj.getCell(COL_AMT).value = item.amount;
+
+                emptySlot.isEmpty = false;
+                emptySlot.type = item.type;
+                emptySlot.year = item.year;
+                writtenCount++;
+            } else {
+                console.warn(`No space found for ${item.type} in ${item.year}`);
+            }
         }
-    }
+    });
 
-    // 3. Process "Samenvatting" Sheet (Optional: Update Total Committed)
-    const summarySheet = workbook.getWorksheet('Samenvatting');
-    if (summarySheet) {
-        // Try to find a cell labeled "Total Committed" and update the value next to it
-        // This is heuristic.
-        // Let's iterate cells to find label
-        let found = false;
-        summarySheet.eachRow((row, rowNumber) => {
-            row.eachCell((cell, colNumber) => {
-                if (!found && /(Total Committed|Totaal Gecommitteerd)/i.test(String(cell.value))) {
-                    // Update the cell to the right?
-                    const nextCell = row.getCell(colNumber + 1);
-                    nextCell.value = result.metrics.totalCommitted;
-                    found = true;
-                }
-            });
-        });
-    }
+    console.log(`Wrote ${writtenCount} commitments to Excel`);
 
-    // 4. Download
+    // Generate filename
+    const safeClientName = clientName ? clientName.replace(/[^a-zA-Z0-9\-_ ]/g, '') : 'Client';
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10);
+
+    // Download
     const outBuffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([outBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `CPT_Plan_${params.startYear}.xlsx`;
+    a.download = `CPT_${safeClientName}_${dateStr}.xlsx`;
     a.click();
     window.URL.revokeObjectURL(url);
 }

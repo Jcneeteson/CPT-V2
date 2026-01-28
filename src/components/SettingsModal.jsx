@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Save, RefreshCw, X, AlertTriangle } from 'lucide-react';
+import { Save, RefreshCw, X, AlertTriangle, Upload, FileSpreadsheet } from 'lucide-react';
 import { resetConfiguration } from '../config/dummyData';
+import { parseFundData } from '../lib/excelImport';
 
 export default function SettingsModal({ isOpen, onClose, config, onConfigChange }) {
     // Local state for the editable configuration
     const [localConfig, setLocalConfig] = useState(null);
     const [error, setError] = useState(null);
+    const [importMsg, setImportMsg] = useState(null);
 
     useEffect(() => {
         if (isOpen && config) {
@@ -32,6 +34,33 @@ export default function SettingsModal({ isOpen, onClose, config, onConfigChange 
         });
     };
 
+    const handleFileUpload = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            setImportMsg("Bestand verwerken...");
+            setError(null);
+
+            const newProfiles = await parseFundData(file);
+
+            setLocalConfig(prev => {
+                const next = { ...prev };
+                // Merge found profiles
+                if (newProfiles.pe) next.profiles.pe = newProfiles.pe;
+                if (newProfiles.vc) next.profiles.vc = newProfiles.vc;
+                if (newProfiles.secondaries) next.profiles.secondaries = newProfiles.secondaries;
+                return next;
+            });
+
+            setImportMsg("Succesvol geïmporteerd! Profielen zijn bijgewerkt.");
+        } catch (err) {
+            console.error(err);
+            setError("Import mislukt: " + err.message);
+            setImportMsg(null);
+        }
+    };
+
     const handleSave = () => {
         try {
             onConfigChange(localConfig);
@@ -46,6 +75,7 @@ export default function SettingsModal({ isOpen, onClose, config, onConfigChange 
         if (confirm('Herstel standaardwaarden?')) {
             const defaults = resetConfiguration();
             setLocalConfig(defaults);
+            setImportMsg(null);
         }
     };
 
@@ -114,6 +144,33 @@ export default function SettingsModal({ isOpen, onClose, config, onConfigChange 
                         <div className="p-2 bg-gray-50 text-[10px] text-gray-400 border-t border-gray-200 text-center">
                             Waarden zijn ratio's t.o.v. commitment (bijv. -0.5 = 50% call).
                         </div>
+                    </div>
+
+                    {/* Import Section */}
+                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                        <h3 className="text-sm font-bold text-gray-700 uppercase mb-3 flex items-center gap-2">
+                            <FileSpreadsheet size={16} /> Importeer Fonds Data
+                        </h3>
+                        <div className="flex items-center gap-4">
+                            <label className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg cursor-pointer transition-colors text-xs font-bold uppercase border border-gray-300">
+                                <Upload size={14} />
+                                Kies Excel Bestand
+                                <input
+                                    type="file"
+                                    accept=".xlsx"
+                                    className="hidden"
+                                    onChange={handleFileUpload}
+                                />
+                            </label>
+                            {importMsg && (
+                                <span className={`text-xs font-medium ${importMsg.includes('Succes') ? 'text-green-600' : 'text-gray-500'}`}>
+                                    {importMsg}
+                                </span>
+                            )}
+                        </div>
+                        <p className="mt-2 text-[10px] text-gray-400">
+                            Upload een 'Capital Calls & Distributions' bestand om de J-Curves automatisch bij te werken.
+                        </p>
                     </div>
 
                     {/* Section for Rules? Keeping it read-only or simple for now as requested tables focus on profiles */}
