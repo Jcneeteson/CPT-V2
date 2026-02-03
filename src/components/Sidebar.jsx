@@ -1,35 +1,55 @@
 import React, { useState } from 'react';
 import { Download, AlertTriangle, TrendingUp, DollarSign } from 'lucide-react';
-import { exportToExcel } from '../lib/export';
+import { exportToExcel, downloadBlob } from '../lib/export';
 import ExportModal from './ExportModal';
+import logo from '../assets/logo.png';
 
 const FormattedNumberInput = ({ value, onChange, className }) => {
+    // Store the raw string value while editing to assume full control
     const [localVal, setLocalVal] = React.useState('');
+    const [isFocused, setIsFocused] = React.useState(false);
 
+    // Sync only when NOT focused to avoid overwriting user input
     React.useEffect(() => {
-        if (value !== undefined && value !== null) {
+        if (!isFocused && value !== undefined && value !== null) {
             setLocalVal(new Intl.NumberFormat('nl-NL').format(value));
         }
-    }, [value]);
+    }, [value, isFocused]);
 
     const handleChange = (e) => {
+        // Allow user to type whatever, we parse on blur
+        // But better: restrict to valid characters if possible, or just let them type
         setLocalVal(e.target.value);
     };
 
+    const handleFocus = () => {
+        setIsFocused(true);
+        // Show raw value for editing (remove dots, convert comma to dot for JS math if needed, but usually users type ints here)
+        // Actually, just showing the number without thousands separators is best.
+        if (value !== undefined && value !== null) {
+            setLocalVal(String(value));
+        }
+    };
+
     const handleBlur = () => {
+        setIsFocused(false);
+        // Clean up input: remove dots (thousands), replace comma with dot (decimal)
+        // Example: "10.000" -> "10000"
+        // Example: "10000" -> "10000"
+        // Example: "10,5" -> "10.5"
         const raw = localVal.replace(/\./g, '').replace(/,/g, '.');
         const num = parseFloat(raw);
         if (!isNaN(num)) {
             onChange(num);
             setLocalVal(new Intl.NumberFormat('nl-NL').format(num));
         } else {
+            // Revert
             setLocalVal(new Intl.NumberFormat('nl-NL').format(value));
         }
     };
 
     const handleKeyDown = (e) => {
         if (e.key === 'Enter') {
-            handleBlur();
             e.target.blur();
         }
     };
@@ -39,6 +59,7 @@ const FormattedNumberInput = ({ value, onChange, className }) => {
             type="text"
             value={localVal}
             onChange={handleChange}
+            onFocus={handleFocus}
             onBlur={handleBlur}
             onKeyDown={handleKeyDown}
             className={className}
@@ -55,7 +76,8 @@ export default function Sidebar({ params, setParams, categories, setCategories, 
         if (!result) {
             throw new Error('Geen plan beschikbaar om te exporteren.');
         }
-        await exportToExcel(result, params, clientName);
+        const { blob, filename } = await exportToExcel(result, params, clientName);
+        downloadBlob(blob, filename);
     };
 
     return (
@@ -63,7 +85,7 @@ export default function Sidebar({ params, setParams, categories, setCategories, 
             <aside className="w-80 flex-shrink-0 bg-gray-50 border-r border-gray-200 flex flex-col h-screen fixed left-0 top-0 z-10 overflow-y-auto">
                 {/* Header / Logo */}
                 <div className="pt-4 pb-2 px-4 border-b border-gray-100 bg-white flex flex-col items-center">
-                    <img src="/src/assets/logo.png" alt="Momentum Family Office" className="w-full h-auto object-contain mb-1" />
+                    <img src={logo} alt="Momentum Family Office" className="w-full h-auto object-contain mb-1" />
                 </div>
 
                 <div className="flex-1 p-6 space-y-8">

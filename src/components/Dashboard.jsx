@@ -8,7 +8,7 @@ const KPICard = ({ label, value, subtext, highlight }) => (
     <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-between h-full">
         <div>
             <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-1">{label}</h3>
-            <div className={`text-2xl font-bold ${highlight ? 'text-[#C5A572]' : 'text-[#0B1E3D]'}`}>
+            <div className={`text-2xl font-bold truncate ${highlight ? 'text-[#C5A572]' : 'text-[#0B1E3D]'}`} title={value}>
                 {value}
             </div>
         </div>
@@ -30,7 +30,7 @@ export default function Dashboard({ result, params, config, onOpenSettings, manu
         if (params?.horizon && params.horizon > chartHorizon) {
             setChartHorizon(params.horizon);
         }
-    }, [params?.horizon]);
+    }, [params?.horizon, chartHorizon]);
 
     if (!result) return <div className="p-10 text-center text-gray-500">Laden...</div>;
 
@@ -39,7 +39,7 @@ export default function Dashboard({ result, params, config, onOpenSettings, manu
 
     // Formatting Helpers
     const formatEuro = (val) => new Intl.NumberFormat('nl-NL', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(val);
-    const formatPercent = (val) => new Intl.NumberFormat('nl-NL', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(val);
+    const formatCompact = (val) => new Intl.NumberFormat('nl-NL', { style: 'currency', currency: 'EUR', notation: "compact", maximumFractionDigits: 1 }).format(val);
 
     // Filter Data for Chart
     const chartData = annualReport.slice(0, chartHorizon);
@@ -94,7 +94,8 @@ export default function Dashboard({ result, params, config, onOpenSettings, manu
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                     <KPICard
                         label="Cumulatief Gecommitteerd"
-                        value={formatEuro(metrics.totalCommitted)}
+                        value={formatCompact(metrics.totalCommitted)}
+                        subtext={formatEuro(metrics.totalCommitted)}
                     />
                     <KPICard
                         label="Volledig Gecommitteerd"
@@ -103,8 +104,8 @@ export default function Dashboard({ result, params, config, onOpenSettings, manu
                     />
                     <KPICard
                         label="Eindwaarde Portefeuille"
-                        value={formatEuro(metrics.finalTotalValue)}
-                        subtext="Cash + Net Asset Value"
+                        value={formatCompact(metrics.finalTotalValue)}
+                        subtext={formatEuro(metrics.finalTotalValue)}
                         highlight
                     />
                     <KPICard
@@ -164,42 +165,49 @@ export default function Dashboard({ result, params, config, onOpenSettings, manu
                         </div>
                     </div>
 
-                    <div className="h-[350px] w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
-                                <XAxis dataKey="year" axisLine={false} tickLine={false} tick={{ fill: '#9CA3AF', fontSize: 12 }} dy={10} />
-                                <YAxis
-                                    tickFormatter={(val) => `€${(val / 1000000).toFixed(0)}m`}
-                                    axisLine={false} tickLine={false} tick={{ fill: '#9CA3AF', fontSize: 12 }}
-                                    width={60}
-                                    domain={[0, yAxisMax || 'auto']}
-                                    allowDataOverflow={true}
-                                />
-                                <Tooltip
-                                    formatter={(val) => formatEuro(val)}
-                                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-                                />
-                                <Legend />
+                    <div className="h-[350px] w-full min-w-0">
+                        {chartData && chartData.length > 0 ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                                <ComposedChart data={chartData} margin={{ top: 20, right: 120, left: 20, bottom: 5 }}>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                                    <XAxis dataKey="year" axisLine={false} tickLine={false} tick={{ fill: '#9CA3AF', fontSize: 12 }} dy={10} />
+                                    <YAxis
+                                        tickFormatter={(val) => `€${(val / 1000000).toFixed(0)}m`}
+                                        axisLine={false} tickLine={false} tick={{ fill: '#9CA3AF', fontSize: 12 }}
+                                        width={60}
+                                        domain={[0, yAxisMax || 'auto']}
+                                        allowDataOverflow={true}
+                                    />
+                                    <Tooltip
+                                        formatter={(val) => formatEuro(val)}
+                                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
+                                    />
+                                    <Legend />
 
-                                <Bar dataKey="capitalCalled" stackId="a" name="Geïnvesteerd Kapitaal" fill="#0B1E3D" barSize={32} />
-                                <Bar dataKey="availableCash" stackId="a" name="Beschikbaar Kapitaal" fill="#9CA3AF" barSize={32} />
-                                <Line type="monotone" dataKey="totalValue" stroke="#C5A572" strokeWidth={3} dot={false} name="Totale Waarde (NAV + Cash)" />
-                                {/* Horizontal Reference Line for Available Capital */}
-                                <ReferenceLine
-                                    y={params.availableCapital}
-                                    stroke="#6B7280"
-                                    strokeDasharray="5 5"
-                                    strokeWidth={2}
-                                    label={{
-                                        value: `Startkapitaal: €${(params.availableCapital / 1000000).toFixed(1)}M`,
-                                        position: 'insideTopRight',
-                                        fill: '#6B7280',
-                                        fontSize: 11
-                                    }}
-                                />
-                            </ComposedChart>
-                        </ResponsiveContainer>
+                                    <Bar dataKey="capitalCalled" stackId="a" name="Geïnvesteerd Kapitaal" fill="#0B1E3D" barSize={32} />
+                                    <Bar dataKey="availableCash" stackId="a" name="Beschikbaar Kapitaal" fill="#9CA3AF" barSize={32} />
+                                    <Line type="monotone" dataKey="totalValue" stroke="#C5A572" strokeWidth={3} dot={false} name="Totale Waarde (NAV + Cash)" />
+                                    {/* Horizontal Reference Line for Available Capital */}
+                                    <ReferenceLine
+                                        y={params.availableCapital}
+                                        stroke="#6B7280"
+                                        strokeDasharray="5 5"
+                                        strokeWidth={2}
+                                        label={{
+                                            value: `Startkapitaal: €${(params.availableCapital / 1000000).toFixed(1)}M`,
+                                            position: 'right',
+                                            fill: '#6B7280',
+                                            fontSize: 11,
+                                            offset: 10
+                                        }}
+                                    />
+                                </ComposedChart>
+                            </ResponsiveContainer>
+                        ) : (
+                            <div className="flex items-center justify-center h-full text-gray-400">
+                                Geen data beschikbaar voor de grafiek
+                            </div>
+                        )}
                     </div>
                 </div>
 

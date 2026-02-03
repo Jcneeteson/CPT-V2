@@ -11,7 +11,7 @@ export async function parseFundData(file) {
     try {
         const buffer = await file.arrayBuffer();
         await workbook.xlsx.load(buffer);
-    } catch (e) {
+    } catch {
         throw new Error("Failed to load Excel file. Ensure it is a valid .xlsx file.");
     }
 

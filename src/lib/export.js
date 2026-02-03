@@ -1,144 +1,315 @@
-import ExcelJS from 'exceljs';
+// This file handles exporting CPT commitments to the new Excel template structure
+
+import JSZip from 'jszip';
+import { saveAs } from 'file-saver';
+import { DEFAULT_CASHFLOW_PROFILES } from '../config/dummyData';
 
 /**
- * Exports the CPT plan to Excel using a bundled template.
- * Uses SheetJS (xlsx) library for better compatibility with complex Excel files.
- * @param {object} result - The solver result.
- * @param {object} params - The params including startYear.
- * @param {string} clientName - The client name for the file.
+ * Export commitments to Excel using CPT Template v2.0
+ * 
+ * @param {object} result - Result object from CPT solver
+ * @param {object} params - Parameters object with availableCapital, startYear, etc.
+ * @param {string} clientName - Name of the client
+ * @returns {Blob} Excel file as blob for download
+ */
+/**
+ * Export commitments using direct XML manipulation (JSZip)
+ * This preserves charts and complex formatting that ExcelJS might drop.
  */
 export async function exportToExcel(result, params, clientName) {
-    const workbook = new ExcelJS.Workbook();
-
-    // Fetch template from public folder
     try {
-        const response = await fetch('/cpt_template.xlsx');
-        if (!response.ok) {
-            throw new Error(`Template niet gevonden (HTTP ${response.status})`);
+        console.log('Starting Surgical Excel export...');
+        console.log(`Client: ${clientName}`);
+
+        if (!result || !result.commitments) {
+            throw new Error('No commitments data available');
         }
-        const buffer = await response.arrayBuffer();
-        await workbook.xlsx.load(buffer);
-    } catch (e) {
-        console.error("Error loading template:", e);
-        throw new Error("Fout bij laden van Excel template.");
-    }
 
-    const summarySheet = workbook.getWorksheet('Samenvatting');
-    if (!summarySheet) {
-        throw new Error('Sheet "Samenvatting" niet gevonden in template.');
-    }
-
-    // Configuration for mapping
-    // Columns (1-based index):
-    const COL_TYPE = 4;   // D: Fondstype
-    const COL_AMT = 6;    // F: Bedrag / Commitment
-    const COL_YEAR = 11;  // K: Instap Jaar
-
-    // IMPORTANT: Limit row range to avoid shared formula issues
-    // The error was at L139, so we stop before that area
-    const START_ROW = 43;
-    const MAX_ROW = 100;  // Reduced from 200 to avoid formula conflicts
-
-    // Helper: Normalize Year from cell value
-    const getYearFromCell = (cellValue) => {
-        if (!cellValue) return null;
-        if (cellValue instanceof Date) return cellValue.getFullYear();
-        if (typeof cellValue === 'number') {
-            if (cellValue > 2500 && cellValue < 60000) {
-                return null;
+        // 1. Prepare Data
+        const commitments = [];
+        result.commitments.forEach(commitment => {
+            if (commitment.breakdown.secondaries > 0) {
+                commitments.push({ type: 'secondaries', amount: Math.round(commitment.breakdown.secondaries), year: commitment.year });
             }
-            if (cellValue >= 2000 && cellValue <= 2100) return cellValue;
-        }
-        const s = String(cellValue);
-        const match = s.match(/20\d{2}/);
-        return match ? parseInt(match[0], 10) : null;
-    };
+            if (commitment.breakdown.pe > 0) {
+                commitments.push({ type: 'pe', amount: Math.round(commitment.breakdown.pe), year: commitment.year });
+            }
+            if (commitment.breakdown.vc > 0) {
+                commitments.push({ type: 'vc', amount: Math.round(commitment.breakdown.vc), year: commitment.year });
+            }
+        });
 
-    // Helper: Normalize Type string
-    const normalizeType = (s) => {
-        if (!s) return "";
-        const str = String(s).toLowerCase();
-        if (str.includes('secondaries')) return 'secondaries';
-        if (str.includes('pe') || str.includes('private equity')) return 'pe';
-        if (str.includes('vc') || str.includes('venture')) return 'vc';
-        return str;
-    };
+        const validCommitments = commitments
+            .filter(c => c.amount > 0 && c.year && c.type)
+            .sort((a, b) => {
+                if (a.year !== b.year) return a.year - b.year;
+                const typePriority = { 'secondaries': 0, 'pe': 1, 'vc': 2 };
+                return typePriority[a.type] - typePriority[b.type];
+            });
 
-    // Flatten commitments into a list of { year, type, amount }
-    const commitmentsToWrite = [];
-    result.commitments.forEach(c => {
-        if (c.breakdown.secondaries > 0) commitmentsToWrite.push({ year: c.year, type: 'secondaries', amount: c.breakdown.secondaries });
-        if (c.breakdown.pe > 0) commitmentsToWrite.push({ year: c.year, type: 'pe', amount: c.breakdown.pe });
-        if (c.breakdown.vc > 0) commitmentsToWrite.push({ year: c.year, type: 'vc', amount: c.breakdown.vc });
-    });
+        // 2. Load Template
+        const response = await fetch('/CPT_template_updated.xlsx');
+        if (!response.ok) throw new Error("Failed to load template");
+        const arrayBuffer = await response.arrayBuffer();
 
-    // Build row index - only read values, don't touch formulas
-    const rows = [];
-    for (let r = START_ROW; r <= MAX_ROW; r++) {
-        const row = summarySheet.getRow(r);
-        const typeCell = row.getCell(COL_TYPE);
-        const yearCell = row.getCell(COL_YEAR);
+        // 3. Unzip
+        const zip = await JSZip.loadAsync(arrayBuffer);
 
-        // Get raw values, avoiding formula cells
-        const typeVal = typeCell.value;
-        const yearVal = yearCell.value;
+        // 4. Read Sheet 1 (Cashflow Matrix)
+        const sheetPath = "xl/worksheets/sheet1.xml";
+        const sheetXmlStr = await zip.file(sheetPath).async("string");
 
-        const type = normalizeType(typeVal);
-        const year = getYearFromCell(yearVal);
-        const isEmpty = !type && !year;
+        // 5. Parse XML
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(sheetXmlStr, "text/xml");
 
-        rows.push({ rowIndex: r, type, year, isEmpty, rowObj: row });
-    }
+        // 6. Update Metadata (A6: Client, A7: Date)
+        updateCellInDoc(doc, "A6", `Client: ${clientName}`, "inlineStr");
+        updateCellInDoc(doc, "A7", `Export datum: ${new Date().toLocaleDateString('nl-NL')}`, "inlineStr");
+        updateCellInDoc(doc, "A8", `Beschikbaar Kapitaal: €${params.availableCapital.toLocaleString('nl-NL')}`, "inlineStr");
 
-    // Process each commitment - only write to amount column
-    let writtenCount = 0;
-    commitmentsToWrite.forEach(item => {
-        let match = rows.find(r => r.type === item.type && r.year === item.year);
+        // 6a. Parse Header Row (Row 8) to map Years to Columns
+        const yearColMap = {}; // { 2025: "F", 2026: "G", ... }
+        const headerRow = findRow(doc, 8);
+        if (headerRow) {
+            const cells = headerRow.getElementsByTagName("c");
+            for (let i = 0; i < cells.length; i++) {
+                const c = cells[i];
+                const r = c.getAttribute("r"); // e.g. "F8"
+                const col = r.replace(/[0-9]/g, ''); // "F"
 
-        if (match) {
-            // Only update the amount cell, leave others intact
-            const amtCell = match.rowObj.getCell(COL_AMT);
-            amtCell.value = item.amount;
-            writtenCount++;
-        } else {
-            // Find empty slot
-            const emptySlot = rows.find(r => r.isEmpty);
-            if (emptySlot) {
-                console.log(`Writing new entry to row ${emptySlot.rowIndex}: ${item.type} ${item.year}`);
+                // Get value
+                let val = null;
+                const vNode = c.getElementsByTagName("v")[0];
+                if (vNode) val = parseFloat(vNode.textContent);
 
-                let typeLabel = "Private Equity";
-                if (item.type === 'secondaries') typeLabel = "Secondaries";
-                if (item.type === 'vc') typeLabel = "Venture Capital";
-
-                // Write values carefully
-                emptySlot.rowObj.getCell(COL_TYPE).value = typeLabel;
-                emptySlot.rowObj.getCell(COL_YEAR).value = item.year; // Use plain number instead of Date
-                emptySlot.rowObj.getCell(COL_AMT).value = item.amount;
-
-                emptySlot.isEmpty = false;
-                emptySlot.type = item.type;
-                emptySlot.year = item.year;
-                writtenCount++;
-            } else {
-                console.warn(`No space found for ${item.type} in ${item.year}`);
+                // If valid year (e.g. > 2000), add to map
+                if (val && val > 2000 && val < 2100) {
+                    yearColMap[Math.round(val)] = col;
+                }
             }
         }
-    });
+        console.log('Year Map:', yearColMap);
 
-    console.log(`Wrote ${writtenCount} commitments to Excel`);
+        // 7. Update Commitments
+        const DATA_START_ROW = 9;
+        const typeMap = { 'secondaries': 'Secondaries', 'pe': 'PE', 'vc': 'VC' };
+        const irrMap = { 'secondaries': 0.15, 'pe': 0.18, 'vc': 0.25 }; // Default IRRs
+        const profiles = params.config?.profiles || DEFAULT_CASHFLOW_PROFILES;
 
-    // Generate filename
-    const safeClientName = clientName ? clientName.replace(/[^a-zA-Z0-9\-_ ]/g, '') : 'Client';
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10);
+        let currentRowIdx = DATA_START_ROW;
+        for (const comm of validCommitments) {
+            if (currentRowIdx > 100) break;
 
-    // Download
-    const outBuffer = await workbook.xlsx.writeBuffer();
-    const blob = new Blob([outBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `CPT_${safeClientName}_${dateStr}.xlsx`;
-    a.click();
-    window.URL.revokeObjectURL(url);
+            const rowNode = findRow(doc, currentRowIdx);
+            if (rowNode) {
+                const typeStr = typeMap[comm.type] || comm.type;
+                updateCellInRow(doc, rowNode, "A", currentRowIdx, typeStr, "inlineStr");
+                updateCellInRow(doc, rowNode, "B", currentRowIdx, "EUR", "inlineStr");
+                updateCellInRow(doc, rowNode, "C", currentRowIdx, comm.amount, "number");
+
+                // IRR in Col D
+                const irr = irrMap[comm.type] || 0;
+                updateCellInRow(doc, rowNode, "D", currentRowIdx, irr, "number");
+
+                // Year is in E (INSTAP)
+                updateCellInRow(doc, rowNode, "E", currentRowIdx, comm.year, "number");
+
+                // Plot Cashflows
+                const profile = profiles[comm.type];
+                if (profile) {
+                    profile.forEach((factor, yearOffset) => {
+                        const projectionYear = comm.year + yearOffset;
+                        const colKey = yearColMap[projectionYear];
+                        if (colKey) {
+                            const cashflow = comm.amount * factor;
+                            updateCellInRow(doc, rowNode, colKey, currentRowIdx, cashflow, "number");
+                        }
+                    });
+                }
+            }
+            currentRowIdx++;
+        }
+
+        // Clean up remaining rows if any (up to 100)
+        // We also need to clear the projection columns for these rows!
+        // We'll assume projection columns go from F onwards.
+        const allProjCols = Object.values(yearColMap);
+
+        for (let r = currentRowIdx; r <= 100; r++) {
+            const rowNode = findRow(doc, r);
+            if (rowNode) {
+                // Clear values
+                updateCellInRow(doc, rowNode, "A", r, "", "inlineStr");
+                updateCellInRow(doc, rowNode, "B", r, "", "inlineStr");
+                updateCellInRow(doc, rowNode, "C", r, "", "inlineStr");
+                updateCellInRow(doc, rowNode, "D", r, "", "inlineStr");
+                updateCellInRow(doc, rowNode, "E", r, "", "inlineStr");
+
+                // Clear projection cells
+                allProjCols.forEach(col => {
+                    updateCellInRow(doc, rowNode, col, r, "", "inlineStr");
+                });
+            }
+        }
+
+        // 8. Serialize and Save
+        const serializer = new XMLSerializer();
+        const newSheetXml = serializer.serializeToString(doc);
+        zip.file(sheetPath, newSheetXml);
+
+        // 9. Generate Blob
+        const blob = await zip.generateAsync({
+            type: "blob",
+            mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        });
+
+        // Generate filename
+        const dateStr = new Date().toISOString().split('T')[0];
+        const filename = `CPT_${clientName.replace(/\s+/g, '_')}_${dateStr}.xlsx`;
+
+        console.log('✅ Surgical export successful');
+        return { blob, filename };
+
+    } catch (error) {
+        console.error('❌ Export failed:', error);
+        throw new Error(`Excel export failed: ${error.message}`);
+    }
+}
+
+// XML Helper Functions
+
+function findRow(doc, rowNum) {
+    const rows = doc.getElementsByTagName("row");
+    // This is O(N) scan, naive but okay for 100 rows.
+    for (let i = 0; i < rows.length; i++) {
+        if (rows[i].getAttribute("r") == rowNum) return rows[i];
+    }
+    return null; // Should handle creation if missing, but template likely has them
+}
+
+function updateCellInDoc(doc, cellRef, value, type) {
+    // Naive search for cell based on Row number extracted from ref
+    const rowNum = cellRef.match(/\d+/)[0];
+    const row = findRow(doc, rowNum);
+    if (row) {
+        const colLetter = cellRef.replace(/[0-9]/g, '');
+        updateCellInRow(doc, row, colLetter, rowNum, value, type);
+    }
+}
+
+function updateCellInRow(doc, rowNode, colLetter, rowNum, value, type) {
+    const cellRef = colLetter + rowNum;
+    let cell = null;
+    const cells = rowNode.getElementsByTagName("c");
+    for (let i = 0; i < cells.length; i++) {
+        if (cells[i].getAttribute("r") === cellRef) {
+            cell = cells[i];
+            break;
+        }
+    }
+
+    if (!cell) {
+        // Create cell if missing (naive append)
+        cell = doc.createElementNS(doc.documentElement.namespaceURI, "c");
+        cell.setAttribute("r", cellRef);
+        rowNode.appendChild(cell);
+    }
+
+    // Clear children
+    while (cell.firstChild) {
+        cell.removeChild(cell.firstChild);
+    }
+
+    // Update value
+    if (value === "" || value === null || value === undefined) {
+        if (cell.hasAttribute("t")) cell.removeAttribute("t");
+        // Empty cell
+        return;
+    }
+
+    if (type === "inlineStr") {
+        cell.setAttribute("t", "inlineStr");
+        const is = doc.createElementNS(doc.documentElement.namespaceURI, "is");
+        const t = doc.createElementNS(doc.documentElement.namespaceURI, "t");
+        t.textContent = value;
+        is.appendChild(t);
+        cell.appendChild(is);
+    } else { // number
+        // Remove 't' or set to 'n' (default)
+        if (cell.hasAttribute("t")) cell.removeAttribute("t");
+        const v = doc.createElementNS(doc.documentElement.namespaceURI, "v");
+        v.textContent = value;
+        cell.appendChild(v);
+    }
+}
+
+/**
+ * Helper function to download the blob as a file
+ */
+export function downloadBlob(blob, filename) {
+    if (!blob) return;
+    saveAs(blob, filename || 'export.xlsx');
+}
+
+/**
+ * Main export function to be called from UI
+ * 
+ * @param {object} result - Result object from CPT solver
+ * @param {object} params - Parameters object
+ * @param {string} clientName - Client name from modal
+ */
+export async function handleExport(result, params, clientName) {
+    try {
+        const { blob, filename } = await exportToExcel(result, params, clientName);
+        downloadBlob(blob, filename);
+        return { success: true, filename };
+    } catch (error) {
+        console.error('Export failed:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// ============================================================================
+// VALIDATION HELPER
+// ============================================================================
+
+/**
+ * Validate commitments before export
+ */
+export function validateCommitments(commitments) {
+    const errors = [];
+
+    if (!Array.isArray(commitments)) {
+        errors.push('Commitments must be an array');
+        return { valid: false, errors };
+    }
+
+    if (commitments.length === 0) {
+        errors.push('No commitments to export');
+        return { valid: false, errors };
+    }
+
+    const maxCapacity = 91;
+    const validCount = commitments.filter(c => c.amount > 0 && c.year && c.type).length;
+
+    if (validCount === 0) {
+        errors.push('No valid commitments found');
+    }
+
+    if (validCount > maxCapacity) {
+        errors.push(
+            `${validCount} commitments exceed template capacity (${maxCapacity}). ` +
+            `${validCount - maxCapacity} will be skipped.`
+        );
+    }
+
+    return {
+        valid: errors.length === 0,
+        errors,
+        warnings: validCount > maxCapacity ? [errors.pop()] : []
+    };
 }

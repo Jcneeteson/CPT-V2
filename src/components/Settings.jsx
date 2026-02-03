@@ -21,7 +21,7 @@ export default function Settings({ config, onConfigChange }) {
             });
             setError(null);
             alert('Configuratie succesvol opgeslagen!');
-        } catch (e) {
+        } catch {
             setError('Ongeldig JSON formaat. Controleer uw syntax.');
         }
     };

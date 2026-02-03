@@ -379,7 +379,6 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
     // Calculate Portfolio Level Metrics
     let totalCalls = 0;
     let totalDistributions = 0;
-    let breakEvenYear = null;
 
     let cumCalls = 0;
     let cumDist = 0;

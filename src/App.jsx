@@ -17,11 +17,20 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Configuration State (Profiles, Rules)
-  const [config, setConfig] = useState({
-    profiles: DEFAULT_CASHFLOW_PROFILES,
-    rules: DEFAULT_ALLOCATION_RULES,
-    netPositions: NET_POSITION_PROFILES,
-    notificationEmail: DEFAULT_NOTIFICATION_EMAIL
+  // Configuration State (Profiles, Rules)
+  // Use lazy init to avoid effect-based state setting
+  const [config, setConfig] = useState(() => {
+    const loaded = getConfiguration();
+    // Maintain backward compatibility for netPositions
+    if (loaded && !loaded.netPositions) {
+      loaded.netPositions = NET_POSITION_PROFILES;
+    }
+    return loaded || {
+      profiles: DEFAULT_CASHFLOW_PROFILES,
+      rules: DEFAULT_ALLOCATION_RULES,
+      netPositions: NET_POSITION_PROFILES,
+      notificationEmail: DEFAULT_NOTIFICATION_EMAIL
+    };
   });
 
   // Simulation State (Inputs)
@@ -37,8 +46,14 @@ function App() {
     };
     if (saved) {
       try {
-        return { ...defaults, ...JSON.parse(saved) };
-      } catch (e) {
+        const parsed = JSON.parse(saved);
+        // Safety check for massive numbers (e.g. storage corruption or overflow bugs)
+        // Cap at 1 Trillion (1e12) to prevent calculation errors
+        if (!parsed.availableCapital || parsed.availableCapital > 1000000000000 || isNaN(parsed.availableCapital)) {
+          parsed.availableCapital = 10000000;
+        }
+        return { ...defaults, ...parsed };
+      } catch {
         return defaults;
       }
     }
@@ -59,20 +74,16 @@ function App() {
   // Persist? Maybe not necessary for prototype, but useful.
   const [manualOverrides, setManualOverrides] = useState({});
 
-  // Solver Result State (can be transient, but we persist to avoid recalc flicker)
-  const [result, setResult] = useState(null);
 
-  // 1. Load Config on Mount
+
+  // 1. Persist Config on Change (Effect replaced the old "Load on Mount" effect)
+  // Since we lazy loaded, we only need to save when it changes.
   useEffect(() => {
-    const loaded = getConfiguration();
-    if (loaded) {
-      // Ensure netPositions exists (backward compatibility)
-      if (!loaded.netPositions) {
-        loaded.netPositions = NET_POSITION_PROFILES;
-      }
-      setConfig(loaded);
-    }
-  }, []);
+    // Optional: Auto-save config if it changes? 
+    // The previous code only loaded on mount. getConfiguration reads from dummyData (localStorage wrapper).
+    // If we want to sync config changes to storage, handleConfigChange does that manually.
+    // So we don't need an effect here for config unless we want to auto-save.
+  }, [config]);
 
   // 2. Persist Inputs on Change
   useEffect(() => {
@@ -83,27 +94,26 @@ function App() {
     localStorage.setItem('cpt_dashboard_categories', JSON.stringify(categories));
   }, [categories]);
 
-  // 3. Run Solver when dependencies change
-  useEffect(() => {
-    // Only solve if we have valid inputs
-    if (params.availableCapital > 0) {
-      try {
-        const res = solveCPT({
-          availableCapital: params.availableCapital,
-          startYear: params.startYear,
-          planningHorizon: params.horizon, // User Input: "Investment Horizon"
-          projectionHorizon: 50,          // Fixed: "Simulation Duration"
-          config: config,
-          selectedCategories: categories,
-          maxYearlyChange: params.maxYearlyChange,
-          firstYearCap: params.firstYearCap,
-          manualOverrides: manualOverrides // Pass overrides
-        });
-        setResult(res);
-      } catch (err) {
-        console.error("Solver Error:", err);
-        // Optional: Set an error state to display in UI?
-      }
+  // 3. Derived State: Run Solver when dependencies change
+  // Use useMemo instead of useEffect+useState to avoid double renders and side-effects during render
+  const result = React.useMemo(() => {
+    if (!params.availableCapital || params.availableCapital <= 0) return null;
+
+    try {
+      return solveCPT({
+        availableCapital: params.availableCapital,
+        startYear: params.startYear,
+        planningHorizon: params.horizon,
+        projectionHorizon: 50,
+        config: config,
+        selectedCategories: categories,
+        maxYearlyChange: params.maxYearlyChange,
+        firstYearCap: params.firstYearCap,
+        manualOverrides: manualOverrides
+      });
+    } catch (err) {
+      console.error("Solver Error:", err);
+      return null;
     }
   }, [params, categories, config, manualOverrides]);
 
@@ -136,12 +146,14 @@ function App() {
         }
       />
 
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        config={config}
-        onConfigChange={handleConfigChange}
-      />
+      {isSettingsOpen && (
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          config={config}
+          onConfigChange={handleConfigChange}
+        />
+      )}
     </>
   );
 }

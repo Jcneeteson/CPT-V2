@@ -1,20 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Save, RefreshCw, X, AlertTriangle, Upload, FileSpreadsheet } from 'lucide-react';
 import { resetConfiguration } from '../config/dummyData';
 import { parseFundData } from '../lib/excelImport';
 
 export default function SettingsModal({ isOpen, onClose, config, onConfigChange }) {
     // Local state for the editable configuration
-    const [localConfig, setLocalConfig] = useState(null);
+    // Initialize directly from props since this component is now conditionally rendered (re-mounted on open)
+    const [localConfig, setLocalConfig] = useState(() => JSON.parse(JSON.stringify(config)));
     const [error, setError] = useState(null);
     const [importMsg, setImportMsg] = useState(null);
-
-    useEffect(() => {
-        if (isOpen && config) {
-            // Deep copy to allow mutation in local state
-            setLocalConfig(JSON.parse(JSON.stringify(config)));
-        }
-    }, [isOpen, config]);
 
     if (!isOpen || !localConfig) return null;
 
