@@ -14,11 +14,11 @@ import { DEFAULT_CASHFLOW_PROFILES } from '../config/dummyData';
  */
 /**
  * Export commitments using direct XML manipulation (JSZip)
- * This preserves charts and complex formatting that ExcelJS might drop.
+ * Updated for CPT Template v4 (Simple Input Population)
  */
 export async function exportToExcel(result, params, clientName) {
     try {
-        console.log('Starting Surgical Excel export...');
+        console.log('Starting Excel export (Template v4)...');
         console.log(`Client: ${clientName}`);
 
         if (!result || !result.commitments) {
@@ -29,13 +29,13 @@ export async function exportToExcel(result, params, clientName) {
         const commitments = [];
         result.commitments.forEach(commitment => {
             if (commitment.breakdown.secondaries > 0) {
-                commitments.push({ type: 'secondaries', amount: Math.round(commitment.breakdown.secondaries), year: commitment.year });
+                commitments.push({ type: 'Secondaries', amount: Math.round(commitment.breakdown.secondaries), year: commitment.year });
             }
             if (commitment.breakdown.pe > 0) {
-                commitments.push({ type: 'pe', amount: Math.round(commitment.breakdown.pe), year: commitment.year });
+                commitments.push({ type: 'PE', amount: Math.round(commitment.breakdown.pe), year: commitment.year });
             }
             if (commitment.breakdown.vc > 0) {
-                commitments.push({ type: 'vc', amount: Math.round(commitment.breakdown.vc), year: commitment.year });
+                commitments.push({ type: 'VC', amount: Math.round(commitment.breakdown.vc), year: commitment.year });
             }
         });
 
@@ -43,19 +43,21 @@ export async function exportToExcel(result, params, clientName) {
             .filter(c => c.amount > 0 && c.year && c.type)
             .sort((a, b) => {
                 if (a.year !== b.year) return a.year - b.year;
-                const typePriority = { 'secondaries': 0, 'pe': 1, 'vc': 2 };
+                // Sort order: Secondaries, PE, VC
+                const typePriority = { 'Secondaries': 0, 'PE': 1, 'VC': 2 };
                 return typePriority[a.type] - typePriority[b.type];
             });
 
         // 2. Load Template
-        const response = await fetch('/CPT_template_updated.xlsx');
-        if (!response.ok) throw new Error("Failed to load template");
+        const response = await fetch('/CPT_export_template.xlsx');
+        if (!response.ok) throw new Error("Failed to load template file");
         const arrayBuffer = await response.arrayBuffer();
 
         // 3. Unzip
         const zip = await JSZip.loadAsync(arrayBuffer);
 
-        // 4. Read Sheet 1 (Cashflow Matrix)
+        // 4. Read Sheet 1 (Cashflow Matrix / Inputs)
+        // Adjust sheet path if necessary, usually sheet1 is the main active sheet
         const sheetPath = "xl/worksheets/sheet1.xml";
         const sheetXmlStr = await zip.file(sheetPath).async("string");
 
@@ -63,102 +65,66 @@ export async function exportToExcel(result, params, clientName) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(sheetXmlStr, "text/xml");
 
-        // 6. Update Metadata (A6: Client, A7: Date)
-        updateCellInDoc(doc, "A6", `Client: ${clientName}`, "inlineStr");
-        updateCellInDoc(doc, "A7", `Export datum: ${new Date().toLocaleDateString('nl-NL')}`, "inlineStr");
-        updateCellInDoc(doc, "A8", `Beschikbaar Kapitaal: €${params.availableCapital.toLocaleString('nl-NL')}`, "inlineStr");
+        // 6. Update Header Inputs
+        // C4: Client Name
+        // C5: Available Capital
+        // Note: Using "inlineStr" for strings, "number" for values
 
-        // 6a. Parse Header Row (Row 8) to map Years to Columns
-        const yearColMap = {}; // { 2025: "F", 2026: "G", ... }
-        const headerRow = findRow(doc, 8);
-        if (headerRow) {
-            const cells = headerRow.getElementsByTagName("c");
-            for (let i = 0; i < cells.length; i++) {
-                const c = cells[i];
-                const r = c.getAttribute("r"); // e.g. "F8"
-                const col = r.replace(/[0-9]/g, ''); // "F"
+        // We find the 'v' (value) nodes or 'is'/'t' (inline string) nodes.
+        // Helper updateCellInDoc handles basic type switching.
 
-                // Get value
-                let val = null;
-                const vNode = c.getElementsByTagName("v")[0];
-                if (vNode) val = parseFloat(vNode.textContent);
+        updateCellInDoc(doc, "C4", clientName, "inlineStr");
+        updateCellInDoc(doc, "C5", params.availableCapital, "number");
 
-                // If valid year (e.g. > 2000), add to map
-                if (val && val > 2000 && val < 2100) {
-                    yearColMap[Math.round(val)] = col;
-                }
-            }
-        }
-        console.log('Year Map:', yearColMap);
+        // 7. Update Commitments List (Starting at Row 9)
+        // Cols: B (Fund Name), C (Commitment), E (Vintage)
 
-        // 7. Update Commitments
         const DATA_START_ROW = 9;
-        const typeMap = { 'secondaries': 'Secondaries', 'pe': 'PE', 'vc': 'VC' };
-        const irrMap = { 'secondaries': 0.15, 'pe': 0.18, 'vc': 0.25 }; // Default IRRs
-        const profiles = params.config?.profiles || DEFAULT_CASHFLOW_PROFILES;
+        const MAX_ROWS = 100; // Cap to avoid massive loops, template likely has limit
 
         let currentRowIdx = DATA_START_ROW;
+
         for (const comm of validCommitments) {
-            if (currentRowIdx > 100) break;
+            if (currentRowIdx > DATA_START_ROW + MAX_ROWS) break;
 
             const rowNode = findRow(doc, currentRowIdx);
             if (rowNode) {
-                const typeStr = typeMap[comm.type] || comm.type;
-                updateCellInRow(doc, rowNode, "A", currentRowIdx, typeStr, "inlineStr");
-                updateCellInRow(doc, rowNode, "B", currentRowIdx, "EUR", "inlineStr");
+                // Determine Generic Name based on type
+                // e.g. "Dummy PE", "Dummy VC", "Dummy Secondaries"
+                const fundName = `Dummy ${comm.type}`;
+
+                // Col B: Fund Name
+                updateCellInRow(doc, rowNode, "B", currentRowIdx, fundName, "inlineStr");
+
+                // Col C: Commitment Amount
                 updateCellInRow(doc, rowNode, "C", currentRowIdx, comm.amount, "number");
 
-                // IRR in Col D
-                const irr = irrMap[comm.type] || 0;
-                updateCellInRow(doc, rowNode, "D", currentRowIdx, irr, "number");
-
-                // Year is in E (INSTAP)
+                // Col E: Vintage / Start Year
                 updateCellInRow(doc, rowNode, "E", currentRowIdx, comm.year, "number");
-
-                // Plot Cashflows
-                const profile = profiles[comm.type];
-                if (profile) {
-                    profile.forEach((factor, yearOffset) => {
-                        const projectionYear = comm.year + yearOffset;
-                        const colKey = yearColMap[projectionYear];
-                        if (colKey) {
-                            const cashflow = comm.amount * factor;
-                            updateCellInRow(doc, rowNode, colKey, currentRowIdx, cashflow, "number");
-                        }
-                    });
-                }
             }
             currentRowIdx++;
         }
 
-        // Clean up remaining rows if any (up to 100)
-        // We also need to clear the projection columns for these rows!
-        // We'll assume projection columns go from F onwards.
-        const allProjCols = Object.values(yearColMap);
-
-        for (let r = currentRowIdx; r <= 100; r++) {
+        // 8. Clean up remaining rows (Clear content)
+        // If the template has pre-filled example data, we must clear it.
+        // We scan a reasonable range after our data ends.
+        for (let r = currentRowIdx; r <= DATA_START_ROW + 50; r++) { // Clear next 50 rows just in case
             const rowNode = findRow(doc, r);
             if (rowNode) {
-                // Clear values
-                updateCellInRow(doc, rowNode, "A", r, "", "inlineStr");
+                // Check if B or C has data, if so clear it. 
+                // We clear B, C, E specifically.
                 updateCellInRow(doc, rowNode, "B", r, "", "inlineStr");
                 updateCellInRow(doc, rowNode, "C", r, "", "inlineStr");
-                updateCellInRow(doc, rowNode, "D", r, "", "inlineStr");
                 updateCellInRow(doc, rowNode, "E", r, "", "inlineStr");
-
-                // Clear projection cells
-                allProjCols.forEach(col => {
-                    updateCellInRow(doc, rowNode, col, r, "", "inlineStr");
-                });
             }
         }
 
-        // 8. Serialize and Save
+        // 9. Serialize and Save
         const serializer = new XMLSerializer();
         const newSheetXml = serializer.serializeToString(doc);
         zip.file(sheetPath, newSheetXml);
 
-        // 9. Generate Blob
+        // 10. Generate Blob
         const blob = await zip.generateAsync({
             type: "blob",
             mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -168,7 +134,7 @@ export async function exportToExcel(result, params, clientName) {
         const dateStr = new Date().toISOString().split('T')[0];
         const filename = `CPT_${clientName.replace(/\s+/g, '_')}_${dateStr}.xlsx`;
 
-        console.log('✅ Surgical export successful');
+        console.log('✅ Export successful');
         return { blob, filename };
 
     } catch (error) {
