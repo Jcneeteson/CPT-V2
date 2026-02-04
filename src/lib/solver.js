@@ -270,7 +270,7 @@ export function solveCPT({ availableCapital, startYear, horizon, planningHorizon
                     }
                 }
 
-                bestAdd = Math.floor(bestAdd / 1000) * 1000;
+                bestAdd = Math.round(bestAdd / 10000) * 10000;
 
                 // Construct final breakdown
                 optimal = forcedTotal + bestAdd;
